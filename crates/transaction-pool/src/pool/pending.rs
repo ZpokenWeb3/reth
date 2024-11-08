@@ -1,7 +1,7 @@
 use crate::{
     identifier::{SenderId, TransactionId},
     pool::{
-        best::{BestTransactions, BestTransactionsWithBasefee},
+        best::{BestTransactions, BestTransactionsWithFees},
         size::SizeTracker,
     },
     Priority, SubPoolLimit, TransactionOrdering, ValidPoolTransaction,
@@ -50,8 +50,8 @@ pub struct PendingPool<T: TransactionOrdering> {
     ///
     /// See also [`PoolTransaction::size`](crate::traits::PoolTransaction::size).
     size_of: SizeTracker,
-    /// Used to broadcast new transactions that have been added to the PendingPool to existing
-    /// snapshots of this pool.
+    /// Used to broadcast new transactions that have been added to the `PendingPool` to existing
+    /// `static_files` of this pool.
     new_transaction_notifier: broadcast::Sender<PendingTransaction<T>>,
 }
 
@@ -89,12 +89,12 @@ impl<T: TransactionOrdering> PendingPool<T> {
 
     /// Returns an iterator over all transactions that are _currently_ ready.
     ///
-    /// 1. The iterator _always_ returns transaction in order: It never returns a transaction with
-    /// an unsatisfied dependency and only returns them if dependency transaction were yielded
-    /// previously. In other words: The nonces of transactions with the same sender will _always_
-    /// increase by exactly 1.
+    /// 1. The iterator _always_ returns transactions in order: it never returns a transaction with
+    ///    an unsatisfied dependency and only returns them if dependency transaction were yielded
+    ///    previously. In other words: the nonces of transactions with the same sender will _always_
+    ///    increase by exactly 1.
     ///
-    /// The order of transactions which satisfy (1.) is determent by their computed priority: A
+    /// The order of transactions which satisfy (1.) is determined by their computed priority: a
     /// transaction with a higher priority is returned before a transaction with a lower priority.
     ///
     /// If two transactions have the same priority score, then the transactions which spent more
@@ -115,14 +115,18 @@ impl<T: TransactionOrdering> PendingPool<T> {
         }
     }
 
-    /// Same as `best` but only returns transactions that satisfy the given basefee.
-    pub(crate) fn best_with_basefee(&self, base_fee: u64) -> BestTransactionsWithBasefee<T> {
-        BestTransactionsWithBasefee { best: self.best(), base_fee }
+    /// Same as `best` but only returns transactions that satisfy the given basefee and blobfee.
+    pub(crate) fn best_with_basefee_and_blobfee(
+        &self,
+        base_fee: u64,
+        base_fee_per_blob_gas: u64,
+    ) -> BestTransactionsWithFees<T> {
+        BestTransactionsWithFees { best: self.best(), base_fee, base_fee_per_blob_gas }
     }
 
     /// Same as `best` but also includes the given unlocked transactions.
     ///
-    /// This mimics the [Self::add_transaction] method, but does not insert the transactions into
+    /// This mimics the [`Self::add_transaction`] method, but does not insert the transactions into
     /// pool but only into the returned iterator.
     ///
     /// Note: this does not insert the unlocked transactions into the pool.
@@ -161,7 +165,7 @@ impl<T: TransactionOrdering> PendingPool<T> {
 
     /// Updates the pool with the new blob fee. Removes
     /// from the subpool all transactions and their dependents that no longer satisfy the given
-    /// base fee (`tx.max_blob_fee < blob_fee`).
+    /// blob fee (`tx.max_blob_fee < blob_fee`).
     ///
     /// Note: the transactions are not returned in a particular order.
     ///
@@ -260,13 +264,12 @@ impl<T: TransactionOrdering> PendingPool<T> {
             // the transaction already has an ancestor, so we only need to ensure that the
             // highest nonces set actually contains the highest nonce for that sender
             self.highest_nonces.remove(ancestor);
-            self.highest_nonces.insert(tx.clone());
         } else {
             // If there's __no__ ancestor in the pool, then this transaction is independent, this is
             // guaranteed because this pool is gapless.
             self.independent_transactions.insert(tx.clone());
-            self.highest_nonces.insert(tx.clone());
         }
+        self.highest_nonces.insert(tx.clone());
     }
 
     /// Returns the ancestor the given transaction, the transaction with `nonce - 1`.
@@ -305,7 +308,7 @@ impl<T: TransactionOrdering> PendingPool<T> {
         self.update_independents_and_highest_nonces(&tx, &tx_id);
         self.all.insert(tx.clone());
 
-        // send the new transaction to any existing pendingpool snapshot iterators
+        // send the new transaction to any existing pendingpool static file iterators
         if self.new_transaction_notifier.receiver_count() > 0 {
             let _ = self.new_transaction_notifier.send(tx.clone());
         }
@@ -313,36 +316,28 @@ impl<T: TransactionOrdering> PendingPool<T> {
         self.by_id.insert(tx_id, tx);
     }
 
-    /// Removes a _mined_ transaction from the pool.
+    /// Removes the transaction from the pool.
     ///
-    /// If the transaction has a descendant transaction it will advance it to the best queue.
-    pub(crate) fn prune_transaction(
+    /// Note: If the transaction has a descendant transaction
+    /// it will advance it to the best queue.
+    pub(crate) fn remove_transaction(
         &mut self,
         id: &TransactionId,
     ) -> Option<Arc<ValidPoolTransaction<T::Transaction>>> {
         // mark the next as independent if it exists
         if let Some(unlocked) = self.get(&id.descendant()) {
             self.independent_transactions.insert(unlocked.clone());
-        };
-        self.remove_transaction(id)
-    }
-
-    /// Removes the transaction from the pool.
-    ///
-    /// Note: this only removes the given transaction.
-    pub(crate) fn remove_transaction(
-        &mut self,
-        id: &TransactionId,
-    ) -> Option<Arc<ValidPoolTransaction<T::Transaction>>> {
+        }
         let tx = self.by_id.remove(id)?;
         self.size_of -= tx.transaction.size();
         self.all.remove(&tx);
         self.independent_transactions.remove(&tx);
 
         // switch out for the next ancestor if there is one
-        self.highest_nonces.remove(&tx);
-        if let Some(ancestor) = self.ancestor(id) {
-            self.highest_nonces.insert(ancestor.clone());
+        if self.highest_nonces.remove(&tx) {
+            if let Some(ancestor) = self.ancestor(id) {
+                self.highest_nonces.insert(ancestor.clone());
+            }
         }
         Some(tx.transaction)
     }
@@ -404,11 +399,11 @@ impl<T: TransactionOrdering> PendingPool<T> {
             unique_senders = self.highest_nonces.len();
             non_local_senders -= unique_removed;
 
-            // we can re-use the temp array
+            // we can reuse the temp array
             removed.clear();
 
             // loop through the highest nonces set, removing transactions until we reach the limit
-            for tx in self.highest_nonces.iter() {
+            for tx in &self.highest_nonces {
                 // return early if the pool is under limits
                 if !limit.is_exceeded(original_length - total_removed, original_size - total_size) ||
                     non_local_senders == 0
@@ -442,18 +437,18 @@ impl<T: TransactionOrdering> PendingPool<T> {
 
             // return if either the pool is under limits or there are no more _eligible_
             // transactions to remove
-            if !limit.is_exceeded(self.len(), self.size()) || non_local_senders == 0 {
+            if !self.exceeds(limit) || non_local_senders == 0 {
                 return
             }
         }
     }
 
-    /// Truncates the pool to the given [SubPoolLimit], removing transactions until the subpool
+    /// Truncates the pool to the given [`SubPoolLimit`], removing transactions until the subpool
     /// limits are met.
     ///
-    /// This attempts to remove transactions by rougly the same amount for each sender. For more
+    /// This attempts to remove transactions by roughly the same amount for each sender. For more
     /// information on this exact process see docs for
-    /// [remove_to_limit](PendingPool::remove_to_limit).
+    /// [`remove_to_limit`](PendingPool::remove_to_limit).
     ///
     /// This first truncates all of the non-local transactions in the pool. If the subpool is still
     /// not under the limit, this truncates the entire pool, including non-local transactions. The
@@ -463,16 +458,28 @@ impl<T: TransactionOrdering> PendingPool<T> {
         limit: SubPoolLimit,
     ) -> Vec<Arc<ValidPoolTransaction<T::Transaction>>> {
         let mut removed = Vec::new();
-        self.remove_to_limit(&limit, false, &mut removed);
-
-        if !limit.is_exceeded(self.len(), self.size()) {
+        // return early if the pool is already under the limits
+        if !self.exceeds(&limit) {
             return removed
         }
 
-        // now repeat for local transactions
+        // first truncate only non-local transactions, returning if the pool end up under the limit
+        self.remove_to_limit(&limit, false, &mut removed);
+        if !self.exceeds(&limit) {
+            return removed
+        }
+
+        // now repeat for local transactions, since local transactions must be removed now for the
+        // pool to be under the limit
         self.remove_to_limit(&limit, true, &mut removed);
 
         removed
+    }
+
+    /// Returns true if the pool exceeds the given limit
+    #[inline]
+    pub(crate) fn exceeds(&self, limit: &SubPoolLimit) -> bool {
+        limit.is_exceeded(self.len(), self.size())
     }
 
     /// The reported size of all transactions in this pool.
@@ -687,19 +694,19 @@ mod tests {
 
         // create a chain of transactions by sender A, B, C
         let mut tx_set =
-            MockTransactionSet::dependent(a_sender, 0, 4, reth_primitives::TxType::EIP1559);
+            MockTransactionSet::dependent(a_sender, 0, 4, reth_primitives::TxType::Eip1559);
         let a = tx_set.clone().into_vec();
 
-        let b = MockTransactionSet::dependent(b_sender, 0, 3, reth_primitives::TxType::EIP1559)
+        let b = MockTransactionSet::dependent(b_sender, 0, 3, reth_primitives::TxType::Eip1559)
             .into_vec();
         tx_set.extend(b.clone());
 
         // C has the same number of txs as B
-        let c = MockTransactionSet::dependent(c_sender, 0, 3, reth_primitives::TxType::EIP1559)
+        let c = MockTransactionSet::dependent(c_sender, 0, 3, reth_primitives::TxType::Eip1559)
             .into_vec();
         tx_set.extend(c.clone());
 
-        let d = MockTransactionSet::dependent(d_sender, 0, 1, reth_primitives::TxType::EIP1559)
+        let d = MockTransactionSet::dependent(d_sender, 0, 1, reth_primitives::TxType::Eip1559)
             .into_vec();
         tx_set.extend(d.clone());
 
@@ -739,10 +746,10 @@ mod tests {
         let d = address!("000000000000000000000000000000000000000d");
 
         // Create transaction chains for senders A, B, C, and D.
-        let a_txs = MockTransactionSet::sequential_transactions_by_sender(a, 4, TxType::EIP1559);
-        let b_txs = MockTransactionSet::sequential_transactions_by_sender(b, 3, TxType::EIP1559);
-        let c_txs = MockTransactionSet::sequential_transactions_by_sender(c, 3, TxType::EIP1559);
-        let d_txs = MockTransactionSet::sequential_transactions_by_sender(d, 1, TxType::EIP1559);
+        let a_txs = MockTransactionSet::sequential_transactions_by_sender(a, 4, TxType::Eip1559);
+        let b_txs = MockTransactionSet::sequential_transactions_by_sender(b, 3, TxType::Eip1559);
+        let c_txs = MockTransactionSet::sequential_transactions_by_sender(c, 3, TxType::Eip1559);
+        let d_txs = MockTransactionSet::sequential_transactions_by_sender(d, 1, TxType::Eip1559);
 
         // Set up expected pending transactions.
         let expected_pending = vec![

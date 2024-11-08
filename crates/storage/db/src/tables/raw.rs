@@ -1,7 +1,5 @@
-use crate::{
-    table::{Compress, Decode, Decompress, DupSort, Encode, Key, Table, Value},
-    DatabaseError,
-};
+use crate::DatabaseError;
+use reth_db_api::table::{Compress, Decode, Decompress, DupSort, Encode, Key, Table, Value};
 use serde::{Deserialize, Serialize};
 
 /// Tuple with `RawKey<T::Key>` and `RawValue<T::Value>`.
@@ -15,13 +13,13 @@ pub struct RawTable<T: Table> {
 }
 
 impl<T: Table> Table for RawTable<T> {
-    const TABLE: crate::Tables = T::TABLE;
+    const NAME: &'static str = T::NAME;
 
     type Key = RawKey<T::Key>;
     type Value = RawValue<T::Value>;
 }
 
-/// Raw DupSort table that can be used to access any table and its data in raw mode.
+/// Raw `DupSort` table that can be used to access any table and its data in raw mode.
 /// This is useful for delayed decoding/encoding of data.
 #[derive(Default, Copy, Clone, Debug)]
 pub struct RawDupSort<T: DupSort> {
@@ -29,7 +27,7 @@ pub struct RawDupSort<T: DupSort> {
 }
 
 impl<T: DupSort> Table for RawDupSort<T> {
-    const TABLE: crate::Tables = T::TABLE;
+    const NAME: &'static str = T::NAME;
 
     type Key = RawKey<T::Key>;
     type Value = RawValue<T::Value>;
@@ -53,13 +51,19 @@ impl<K: Key> RawKey<K> {
         Self { key: K::encode(key).into(), _phantom: std::marker::PhantomData }
     }
 
+    /// Creates a raw key from an existing `Vec`. Useful when we already have the encoded
+    /// key.
+    pub const fn from_vec(vec: Vec<u8>) -> Self {
+        Self { key: vec, _phantom: std::marker::PhantomData }
+    }
+
     /// Returns the decoded value.
     pub fn key(&self) -> Result<K, DatabaseError> {
         K::decode(&self.key)
     }
 
     /// Returns the raw key as seen on the database.
-    pub fn raw_key(&self) -> &Vec<u8> {
+    pub const fn raw_key(&self) -> &Vec<u8> {
         &self.key
     }
 
@@ -71,7 +75,7 @@ impl<K: Key> RawKey<K> {
 
 impl<K: Key> From<K> for RawKey<K> {
     fn from(key: K) -> Self {
-        RawKey::new(key)
+        Self::new(key)
     }
 }
 
@@ -112,6 +116,12 @@ impl<V: Value> RawValue<V> {
         Self { value: V::compress(value).into(), _phantom: std::marker::PhantomData }
     }
 
+    /// Creates a raw value from an existing `Vec`. Useful when we already have the encoded
+    /// value.
+    pub const fn from_vec(vec: Vec<u8>) -> Self {
+        Self { value: vec, _phantom: std::marker::PhantomData }
+    }
+
     /// Returns the decompressed value.
     pub fn value(&self) -> Result<V, DatabaseError> {
         V::decompress(&self.value)
@@ -130,7 +140,7 @@ impl<V: Value> RawValue<V> {
 
 impl<V: Value> From<V> for RawValue<V> {
     fn from(value: V) -> Self {
-        RawValue::new(value)
+        Self::new(value)
     }
 }
 

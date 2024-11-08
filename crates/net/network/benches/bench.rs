@@ -3,7 +3,7 @@ use criterion::*;
 use futures::StreamExt;
 use pprof::criterion::{Output, PProfProfiler};
 use rand::thread_rng;
-use reth_network::{test_utils::Testnet, NetworkEvents};
+use reth_network::{test_utils::Testnet, NetworkEventListenerProvider};
 use reth_network_api::Peers;
 use reth_primitives::U256;
 use reth_provider::test_utils::{ExtendedAccount, MockEthProvider};
@@ -12,7 +12,7 @@ use std::sync::Arc;
 use tokio::{runtime::Runtime as TokioRuntime, sync::mpsc::unbounded_channel};
 
 criterion_group!(
-    name = brodcast_benches;
+    name = broadcast_benches;
     config = Criterion::default().with_profiler(PProfProfiler::new(100, Output::Flamegraph(None)));
     targets = broadcast_ingress_bench
 );
@@ -87,4 +87,4 @@ pub fn broadcast_ingress_bench(c: &mut Criterion) {
     });
 }
 
-criterion_main!(brodcast_benches);
+criterion_main!(broadcast_benches);

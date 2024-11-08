@@ -40,16 +40,17 @@
     html_favicon_url = "https://avatars0.githubusercontent.com/u/97369466?s=256",
     issue_tracker_base_url = "https://github.com/paradigmxyz/reth/issues/"
 )]
+#![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 
 // Re-export tracing crates
 pub use tracing;
+pub use tracing_appender;
 pub use tracing_subscriber;
 
-// Re-export LogFormat
+// Re-export our types
 pub use formatter::LogFormat;
 pub use layers::{FileInfo, FileWorkerGuard};
-
 pub use test_tracer::TestTracer;
 
 mod formatter;
@@ -139,7 +140,7 @@ impl LayerInfo {
     ///  * `default_directive` - Directive for filtering log messages.
     ///  * `filters` - Additional filtering parameters as a string.
     ///  * `color` - Optional color configuration for the log messages.
-    pub fn new(
+    pub const fn new(
         format: LogFormat,
         default_directive: String,
         filters: String,
@@ -158,7 +159,7 @@ impl Default for LayerInfo {
         Self {
             format: LogFormat::Terminal,
             default_directive: LevelFilter::INFO.to_string(),
-            filters: "".to_string(),
+            filters: String::new(),
             color: Some("always".to_string()),
         }
     }

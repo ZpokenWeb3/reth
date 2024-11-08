@@ -1,23 +1,30 @@
 //! Blocks/Headers management for the p2p network.
 
-use crate::{metrics::EthRequestHandlerMetrics, peers::PeersHandle};
-use futures::StreamExt;
-use reth_eth_wire::{
-    BlockBodies, BlockHeaders, GetBlockBodies, GetBlockHeaders, GetNodeData, GetReceipts, NodeData,
-    Receipts,
-};
-use reth_interfaces::p2p::error::RequestResult;
-use reth_primitives::{BlockBody, BlockHashOrNumber, Header, HeadersDirection, PeerId};
-use reth_provider::{BlockReader, HeaderProvider, ReceiptProvider};
 use std::{
-    borrow::Borrow,
     future::Future,
-    hash::Hash,
     pin::Pin,
     task::{Context, Poll},
+    time::Duration,
 };
+
+use alloy_rlp::Encodable;
+use futures::StreamExt;
+use reth_eth_wire::{
+    BlockBodies, BlockHeaders, GetBlockBodies, GetBlockHeaders, GetNodeData, GetReceipts,
+    HeadersDirection, NodeData, Receipts,
+};
+use reth_network_api::test_utils::PeersHandle;
+use reth_network_p2p::error::RequestResult;
+use reth_network_peers::PeerId;
+use reth_primitives::{BlockBody, BlockHashOrNumber, Header};
+use reth_storage_api::{BlockReader, HeaderProvider, ReceiptProvider};
 use tokio::sync::{mpsc::Receiver, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
+
+use crate::{
+    budget::DEFAULT_BUDGET_TRY_DRAIN_DOWNLOADERS, metered_poll_nested_stream_with_budget,
+    metrics::EthRequestHandlerMetrics,
+};
 
 // Limits: <https://github.com/ethereum/go-ethereum/blob/b0d44338bbcefee044f1f635a84487cbbd8f0538/eth/protocols/eth/handler.go#L34-L56>
 
@@ -34,21 +41,11 @@ const MAX_HEADERS_SERVE: usize = 1024;
 /// Maximum number of block headers to serve.
 ///
 /// Used to limit lookups. With 24KB block sizes nowadays, the practical limit will always be
-/// SOFT_RESPONSE_LIMIT.
+/// `SOFT_RESPONSE_LIMIT`.
 const MAX_BODIES_SERVE: usize = 1024;
-
-/// Estimated size in bytes of an RLP encoded receipt.
-const APPROX_RECEIPT_SIZE: usize = 24 * 1024;
-
-/// Estimated size in bytes of an RLP encoded body.
-// TODO: check 24kb blocksize assumption
-const APPROX_BODY_SIZE: usize = 24 * 1024;
 
 /// Maximum size of replies to data retrievals.
 const SOFT_RESPONSE_LIMIT: usize = 2 * 1024 * 1024;
-
-/// Estimated size in bytes of an RLP encoded header.
-const APPROX_HEADER_SIZE: usize = 500;
 
 /// Manages eth related requests on top of the p2p network.
 ///
@@ -62,7 +59,7 @@ pub struct EthRequestHandler<C> {
     // TODO use to report spammers
     #[allow(dead_code)]
     peers: PeersHandle,
-    /// Incoming request from the [NetworkManager](crate::NetworkManager).
+    /// Incoming request from the [`NetworkManager`](crate::NetworkManager).
     incoming_requests: ReceiverStream<IncomingEthRequest>,
     /// Metrics for the eth request handler.
     metrics: EthRequestHandlerMetrics,
@@ -72,8 +69,12 @@ pub struct EthRequestHandler<C> {
 impl<C> EthRequestHandler<C> {
     /// Create a new instance
     pub fn new(client: C, peers: PeersHandle, incoming: Receiver<IncomingEthRequest>) -> Self {
-        let metrics = Default::default();
-        Self { client, peers, incoming_requests: ReceiverStream::new(incoming), metrics }
+        Self {
+            client,
+            peers,
+            incoming_requests: ReceiverStream::new(incoming),
+            metrics: Default::default(),
+        }
     }
 }
 
@@ -127,13 +128,10 @@ where
                     }
                 }
 
+                total_bytes += header.length();
                 headers.push(header);
-                if headers.len() >= MAX_HEADERS_SERVE {
-                    break
-                }
 
-                total_bytes += APPROX_HEADER_SIZE;
-                if total_bytes > SOFT_RESPONSE_LIMIT {
+                if headers.len() >= MAX_HEADERS_SERVE || total_bytes > SOFT_RESPONSE_LIMIT {
                     break
                 }
             } else {
@@ -145,42 +143,35 @@ where
     }
 
     fn on_headers_request(
-        &mut self,
+        &self,
         _peer_id: PeerId,
         request: GetBlockHeaders,
         response: oneshot::Sender<RequestResult<BlockHeaders>>,
     ) {
-        self.metrics.received_headers_requests.increment(1);
+        self.metrics.eth_headers_requests_received_total.increment(1);
         let headers = self.get_headers_response(request);
         let _ = response.send(Ok(BlockHeaders(headers)));
     }
 
     fn on_bodies_request(
-        &mut self,
+        &self,
         _peer_id: PeerId,
         request: GetBlockBodies,
         response: oneshot::Sender<RequestResult<BlockBodies>>,
     ) {
-        self.metrics.received_bodies_requests.increment(1);
+        self.metrics.eth_bodies_requests_received_total.increment(1);
         let mut bodies = Vec::new();
 
         let mut total_bytes = 0;
 
         for hash in request.0 {
             if let Some(block) = self.client.block_by_hash(hash).unwrap_or_default() {
-                let body = BlockBody {
-                    transactions: block.body,
-                    ommers: block.ommers,
-                    withdrawals: block.withdrawals,
-                };
+                let body: BlockBody = block.into();
 
+                total_bytes += body.length();
                 bodies.push(body);
-                if bodies.len() >= MAX_BODIES_SERVE {
-                    break
-                }
 
-                total_bytes += APPROX_BODY_SIZE;
-                if total_bytes > SOFT_RESPONSE_LIMIT {
+                if bodies.len() >= MAX_BODIES_SERVE || total_bytes > SOFT_RESPONSE_LIMIT {
                     break
                 }
             } else {
@@ -192,11 +183,13 @@ where
     }
 
     fn on_receipts_request(
-        &mut self,
+        &self,
         _peer_id: PeerId,
         request: GetReceipts,
         response: oneshot::Sender<RequestResult<Receipts>>,
     ) {
+        self.metrics.eth_receipts_requests_received_total.increment(1);
+
         let mut receipts = Vec::new();
 
         let mut total_bytes = 0;
@@ -210,13 +203,10 @@ where
                     .map(|receipt| receipt.with_bloom())
                     .collect::<Vec<_>>();
 
+                total_bytes += receipt.length();
                 receipts.push(receipt);
-                if receipts.len() >= MAX_RECEIPTS_SERVE {
-                    break
-                }
 
-                total_bytes += APPROX_RECEIPT_SIZE;
-                if total_bytes > SOFT_RESPONSE_LIMIT {
+                if receipts.len() >= MAX_RECEIPTS_SERVE || total_bytes > SOFT_RESPONSE_LIMIT {
                     break
                 }
             } else {
@@ -240,39 +230,41 @@ where
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
 
-        loop {
-            match this.incoming_requests.poll_next_unpin(cx) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(None) => return Poll::Ready(()),
-                Poll::Ready(Some(incoming)) => match incoming {
+        let mut acc = Duration::ZERO;
+        let maybe_more_incoming_requests = metered_poll_nested_stream_with_budget!(
+            acc,
+            "net::eth",
+            "Incoming eth requests stream",
+            DEFAULT_BUDGET_TRY_DRAIN_DOWNLOADERS,
+            this.incoming_requests.poll_next_unpin(cx),
+            |incoming| {
+                match incoming {
                     IncomingEthRequest::GetBlockHeaders { peer_id, request, response } => {
                         this.on_headers_request(peer_id, request, response)
                     }
                     IncomingEthRequest::GetBlockBodies { peer_id, request, response } => {
                         this.on_bodies_request(peer_id, request, response)
                     }
-                    IncomingEthRequest::GetNodeData { .. } => {}
+                    IncomingEthRequest::GetNodeData { .. } => {
+                        this.metrics.eth_node_data_requests_received_total.increment(1);
+                    }
                     IncomingEthRequest::GetReceipts { peer_id, request, response } => {
                         this.on_receipts_request(peer_id, request, response)
                     }
-                },
-            }
+                }
+            },
+        );
+
+        this.metrics.acc_duration_poll_eth_req_handler.set(acc.as_secs_f64());
+
+        // stream is fully drained and import futures pending
+        if maybe_more_incoming_requests {
+            // make sure we're woken up again
+            cx.waker().wake_by_ref();
+            return Poll::Pending
         }
-    }
-}
 
-/// Represents a handled [`GetBlockHeaders`] requests
-///
-/// This is the key type for spam detection cache. The counter is ignored during `PartialEq` and
-/// `Hash`.
-#[derive(Debug, PartialEq, Hash)]
-struct RespondedGetBlockHeaders {
-    req: (PeerId, GetBlockHeaders),
-}
-
-impl Borrow<(PeerId, GetBlockHeaders)> for RespondedGetBlockHeaders {
-    fn borrow(&self) -> &(PeerId, GetBlockHeaders) {
-        &self.req
+        Poll::Pending
     }
 }
 

@@ -1,14 +1,18 @@
-use crate::{Address, Bytes, TransactionKind, TxType, TxValue, B256};
+use crate::{Address, Bytes, TxKind, TxType, B256, U256};
 use alloy_rlp::{
     length_of_length, Decodable, Encodable, Error as DecodeError, Header, EMPTY_STRING_CODE,
 };
 use bytes::Buf;
-use reth_codecs::{main_codec, Compact};
-use std::mem;
+use core::mem;
+#[cfg(any(test, feature = "reth-codec"))]
+use reth_codecs::Compact;
+use serde::{Deserialize, Serialize};
 
 /// Deposit transactions, also known as deposits are initiated on L1, and executed on L2.
-#[main_codec]
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[cfg_attr(any(test, feature = "arbitrary"), derive(arbitrary::Arbitrary))]
+#[cfg_attr(any(test, feature = "reth-codec"), derive(Compact))]
+#[cfg_attr(any(test, feature = "reth-codec"), reth_codecs::add_arbitrary_tests(compact))]
 pub struct TxDeposit {
     /// Hash that uniquely identifies the source of the deposit.
     pub source_hash: B256,
@@ -16,11 +20,11 @@ pub struct TxDeposit {
     pub from: Address,
     /// The address of the recipient account, or the null (zero-length) address if the deposited
     /// transaction is a contract creation.
-    pub to: TransactionKind,
+    pub to: TxKind,
     /// The ETH value to mint on L2.
     pub mint: Option<u128>,
     ///  The ETH value to send to the recipient account.
-    pub value: TxValue,
+    pub value: U256,
     /// The gas limit for the L2 transaction.
     pub gas_limit: u64,
     /// Field indicating if this transaction is exempt from the L2 gas limit.
@@ -31,20 +35,20 @@ pub struct TxDeposit {
 }
 
 impl TxDeposit {
-    /// Calculates a heuristic for the in-memory size of the [TxDeposit] transaction.
+    /// Calculates a heuristic for the in-memory size of the [`TxDeposit`] transaction.
     #[inline]
     pub fn size(&self) -> usize {
         mem::size_of::<B256>() + // source_hash
         mem::size_of::<Address>() + // from
         self.to.size() + // to
         mem::size_of::<Option<u128>>() + // mint
-        mem::size_of::<TxValue>() + // value
+        mem::size_of::<U256>() + // value
         mem::size_of::<u64>() + // gas_limit
         mem::size_of::<bool>() + // is_system_transaction
         self.input.len() // input
     }
 
-    /// Decodes the inner [TxDeposit] fields from RLP bytes.
+    /// Decodes the inner [`TxDeposit`] fields from RLP bytes.
     ///
     /// NOTE: This assumes a RLP header has already been decoded, and _just_ decodes the following
     /// RLP fields in the following order:
@@ -89,7 +93,7 @@ impl TxDeposit {
     }
 
     /// Encodes only the transaction's fields into the desired buffer, without a RLP header.
-    /// <https://github.com/ethereum-optimism/optimism/blob/develop/specs/deposits.md#the-deposited-transaction-type>
+    /// <https://github.com/ethereum-optimism/specs/blob/main/specs/protocol/deposits.md#the-deposited-transaction-type>
     pub(crate) fn encode_fields(&self, out: &mut dyn bytes::BufMut) {
         self.source_hash.encode(out);
         self.from.encode(out);
@@ -137,16 +141,15 @@ impl TxDeposit {
     }
 
     /// Get the transaction type
-    pub(crate) fn tx_type(&self) -> TxType {
-        TxType::DEPOSIT
+    pub(crate) const fn tx_type(&self) -> TxType {
+        TxType::Deposit
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{revm_primitives::hex_literal::hex, Bytes, TransactionSigned};
-    use alloy_rlp::Decodable;
+    use crate::{revm_primitives::hex_literal::hex, TransactionSigned};
     use bytes::BytesMut;
 
     #[test]
@@ -170,9 +173,9 @@ mod tests {
         let original = TxDeposit {
             source_hash: B256::default(),
             from: Address::default(),
-            to: TransactionKind::default(),
+            to: TxKind::default(),
             mint: Some(100),
-            value: TxValue::default(),
+            value: U256::default(),
             gas_limit: 50000,
             is_system_transaction: true,
             input: Bytes::default(),
@@ -190,9 +193,9 @@ mod tests {
         let tx_deposit = TxDeposit {
             source_hash: B256::default(),
             from: Address::default(),
-            to: TransactionKind::default(),
+            to: TxKind::default(),
             mint: Some(100),
-            value: TxValue::default(),
+            value: U256::default(),
             gas_limit: 50000,
             is_system_transaction: true,
             input: Bytes::default(),
@@ -212,9 +215,9 @@ mod tests {
         let tx_deposit = TxDeposit {
             source_hash: B256::default(),
             from: Address::default(),
-            to: TransactionKind::default(),
+            to: TxKind::default(),
             mint: Some(100),
-            value: TxValue::default(),
+            value: U256::default(),
             gas_limit: 50000,
             is_system_transaction: true,
             input: Bytes::default(),

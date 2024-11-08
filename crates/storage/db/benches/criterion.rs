@@ -3,10 +3,10 @@ use criterion::{
     black_box, criterion_group, criterion_main, measurement::WallTime, BenchmarkGroup, Criterion,
 };
 use pprof::criterion::{Output, PProfProfiler};
-use reth_db::{
+use reth_db::tables::*;
+use reth_db_api::{
     cursor::{DbCursorRO, DbCursorRW, DbDupCursorRO, DbDupCursorRW},
     table::{Decode, Decompress, DupSort},
-    tables::*,
     transaction::DbTx,
 };
 
@@ -23,12 +23,12 @@ pub fn db(c: &mut Criterion) {
     group.warm_up_time(std::time::Duration::from_millis(200));
 
     measure_table_db::<CanonicalHeaders>(&mut group);
-    measure_table_db::<HeaderTD>(&mut group);
+    measure_table_db::<HeaderTerminalDifficulties>(&mut group);
     measure_table_db::<HeaderNumbers>(&mut group);
     measure_table_db::<Headers>(&mut group);
     measure_table_db::<BlockBodyIndices>(&mut group);
     measure_table_db::<BlockOmmers>(&mut group);
-    measure_table_db::<TxHashNumber>(&mut group);
+    measure_table_db::<TransactionHashNumbers>(&mut group);
     measure_table_db::<Transactions>(&mut group);
     measure_dupsort_db::<PlainStorageState>(&mut group);
     measure_table_db::<PlainAccountState>(&mut group);
@@ -40,12 +40,12 @@ pub fn serialization(c: &mut Criterion) {
     group.warm_up_time(std::time::Duration::from_millis(200));
 
     measure_table_serialization::<CanonicalHeaders>(&mut group);
-    measure_table_serialization::<HeaderTD>(&mut group);
+    measure_table_serialization::<HeaderTerminalDifficulties>(&mut group);
     measure_table_serialization::<HeaderNumbers>(&mut group);
     measure_table_serialization::<Headers>(&mut group);
     measure_table_serialization::<BlockBodyIndices>(&mut group);
     measure_table_serialization::<BlockOmmers>(&mut group);
-    measure_table_serialization::<TxHashNumber>(&mut group);
+    measure_table_serialization::<TransactionHashNumbers>(&mut group);
     measure_table_serialization::<Transactions>(&mut group);
     measure_table_serialization::<PlainStorageState>(&mut group);
     measure_table_serialization::<PlainAccountState>(&mut group);

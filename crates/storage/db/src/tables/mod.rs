@@ -4,45 +4,44 @@
 //!
 //! This module defines the tables in reth, as well as some table-related abstractions:
 //!
-//! - [`codecs`] integrates different codecs into [`Encode`](crate::abstraction::table::Encode) and
-//!   [`Decode`](crate::abstraction::table::Decode)
-//! - [`models`] defines the values written to tables
+//! - [`codecs`] integrates different codecs into [`Encode`] and [`Decode`]
+//! - [`models`](reth_db_api::models) defines the values written to tables
 //!
 //! # Database Tour
 //!
 //! TODO(onbjerg): Find appropriate format for this...
 
 pub mod codecs;
-pub mod models;
 
 mod raw;
 pub use raw::{RawDupSort, RawKey, RawTable, RawValue, TableRawRow};
 
+#[cfg(feature = "mdbx")]
 pub(crate) mod utils;
 
-use crate::{
-    abstraction::table::Table,
-    table::DupSort,
-    tables::{
-        codecs::CompactU256,
-        models::{
-            accounts::{AccountBeforeTx, BlockNumberAddress},
-            blocks::{HeaderHash, StoredBlockOmmers},
-            storage_sharded_key::StorageShardedKey,
-            ShardedKey, StoredBlockBodyIndices, StoredBlockWithdrawals,
-        },
+use reth_db_api::{
+    models::{
+        accounts::BlockNumberAddress,
+        blocks::{HeaderHash, StoredBlockOmmers},
+        client_version::ClientVersion,
+        storage_sharded_key::StorageShardedKey,
+        AccountBeforeTx, CompactU256, ShardedKey, StoredBlockBodyIndices, StoredBlockWithdrawals,
     },
+    table::{Decode, DupSort, Encode, Table},
 };
 use reth_primitives::{
-    stage::StageCheckpoint,
-    trie::{StorageTrieEntry, StoredBranchNode, StoredNibbles, StoredNibblesSubKey},
-    Account, Address, BlockHash, BlockNumber, Bytecode, Header, IntegerList, PruneCheckpoint,
-    PruneSegment, Receipt, StorageEntry, TransactionSignedNoHash, TxHash, TxNumber, B256,
+    Account, Address, BlockHash, BlockNumber, Bytecode, Header, Receipt, Requests, StorageEntry,
+    TransactionSignedNoHash, TxHash, TxNumber, B256,
 };
+use reth_primitives_traits::IntegerList;
+use reth_prune_types::{PruneCheckpoint, PruneSegment};
+use reth_stages_types::StageCheckpoint;
+use reth_trie_common::{BranchNodeCompact, StorageTrieEntry, StoredNibbles, StoredNibblesSubKey};
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// Enum for the types of tables present in libmdbx.
-#[derive(Debug, PartialEq, Copy, Clone)]
+#[derive(Debug, PartialEq, Eq, Copy, Clone)]
 pub enum TableType {
     /// key value table
     Table,
@@ -56,10 +55,8 @@ pub enum TableType {
 /// # Example
 ///
 /// ```
-/// use reth_db::{
-///     table::{DupSort, Table},
-///     TableViewer, Tables,
-/// };
+/// use reth_db::{TableViewer, Tables};
+/// use reth_db_api::table::{DupSort, Table};
 ///
 /// struct MyTableViewer;
 ///
@@ -86,6 +83,11 @@ pub trait TableViewer<R> {
     /// The error type returned by the viewer.
     type Error;
 
+    /// Calls `view` with the correct table type.
+    fn view_rt(&self, table: Tables) -> Result<R, Self::Error> {
+        table.view(self)
+    }
+
     /// Operate on the table in a generic way.
     fn view<T: Table>(&self) -> Result<R, Self::Error>;
 
@@ -98,6 +100,7 @@ pub trait TableViewer<R> {
 }
 
 /// Defines all the tables in the database.
+#[macro_export]
 macro_rules! tables {
     (@bool) => { false };
     (@bool $($t:tt)+) => { true };
@@ -126,8 +129,8 @@ macro_rules! tables {
                 }
             }
 
-            impl $crate::table::Table for $name {
-                const TABLE: Tables = Tables::$name;
+            impl reth_db_api::table::Table for $name {
+                const NAME: &'static str = table_names::$name;
 
                 type Key = $key;
                 type Value = $value;
@@ -191,7 +194,7 @@ macro_rules! tables {
             /// Allows to operate on specific table type
             pub fn view<T, R>(&self, visitor: &T) -> Result<R, T::Error>
             where
-                T: TableViewer<R>,
+                T: ?Sized + TableViewer<R>,
             {
                 match self {
                     $(
@@ -235,6 +238,34 @@ macro_rules! tables {
                 pub(super) const $name: &'static str = stringify!($name);
             )*
         }
+
+        /// Maps a run-time [`Tables`] enum value to its corresponding compile-time [`Table`] type.
+        ///
+        /// This is a simpler alternative to [`TableViewer`].
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// use reth_db::{Tables, tables_to_generic};
+        /// use reth_db_api::table::Table;
+        ///
+        /// let table = Tables::Headers;
+        /// let result = tables_to_generic!(table, |GenericTable| GenericTable::NAME);
+        /// assert_eq!(result, table.name());
+        /// ```
+        #[macro_export]
+        macro_rules! tables_to_generic {
+            ($table:expr, |$generic_name:ident| $e:expr) => {
+                match $table {
+                    $(
+                        Tables::$name => {
+                            use $crate::tables::$name as $generic_name;
+                            $e
+                        },
+                    )*
+                }
+            };
+        }
     };
 }
 
@@ -243,7 +274,7 @@ tables! {
     table CanonicalHeaders<Key = BlockNumber, Value = HeaderHash>;
 
     /// Stores the total difficulty from a block header.
-    table HeaderTD<Key = BlockNumber, Value = CompactU256>;
+    table HeaderTerminalDifficulties<Key = BlockNumber, Value = CompactU256>;
 
     /// Stores the block number corresponding to a header.
     table HeaderNumbers<Key = BlockHash, Value = BlockNumber>;
@@ -266,12 +297,12 @@ tables! {
     table Transactions<Key = TxNumber, Value = TransactionSignedNoHash>;
 
     /// Stores the mapping of the transaction hash to the transaction number.
-    table TxHashNumber<Key = TxHash, Value = TxNumber>;
+    table TransactionHashNumbers<Key = TxHash, Value = TxNumber>;
 
     /// Stores the mapping of transaction number to the blocks number.
     ///
     /// The key is the highest transaction ID in the block.
-    table TransactionBlock<Key = TxNumber, Value = BlockNumber>;
+    table TransactionBlocks<Key = TxNumber, Value = BlockNumber>;
 
     /// Canonical only Stores transaction receipts.
     table Receipts<Key = TxNumber, Value = Receipt>;
@@ -306,7 +337,7 @@ tables! {
     /// * If there were no shard we would get `None` entry or entry of different storage key.
     ///
     /// Code example can be found in `reth_provider::HistoricalStateProviderRef`
-    table AccountHistory<Key = ShardedKey<Address>, Value = BlockNumberList>;
+    table AccountsHistory<Key = ShardedKey<Address>, Value = BlockNumberList>;
 
     /// Stores pointers to block number changeset with changes for each storage key.
     ///
@@ -326,32 +357,32 @@ tables! {
     /// * If there were no shard we would get `None` entry or entry of different storage key.
     ///
     /// Code example can be found in `reth_provider::HistoricalStateProviderRef`
-    table StorageHistory<Key = StorageShardedKey, Value = BlockNumberList>;
+    table StoragesHistory<Key = StorageShardedKey, Value = BlockNumberList>;
 
     /// Stores the state of an account before a certain transaction changed it.
     /// Change on state can be: account is created, selfdestructed, touched while empty
     /// or changed balance,nonce.
-    table AccountChangeSet<Key = BlockNumber, Value = AccountBeforeTx, SubKey = Address>;
+    table AccountChangeSets<Key = BlockNumber, Value = AccountBeforeTx, SubKey = Address>;
 
     /// Stores the state of a storage key before a certain transaction changed it.
     /// If [`StorageEntry::value`] is zero, this means storage was not existing
     /// and needs to be removed.
-    table StorageChangeSet<Key = BlockNumberAddress, Value = StorageEntry, SubKey = B256>;
+    table StorageChangeSets<Key = BlockNumberAddress, Value = StorageEntry, SubKey = B256>;
 
     /// Stores the current state of an [`Account`] indexed with `keccak256Address`
-    /// This table is in preparation for merkelization and calculation of state root.
+    /// This table is in preparation for merklization and calculation of state root.
     /// We are saving whole account data as it is needed for partial update when
-    /// part of storage is changed. Benefit for merkelization is that hashed addresses are sorted.
-    table HashedAccount<Key = B256, Value = Account>;
+    /// part of storage is changed. Benefit for merklization is that hashed addresses are sorted.
+    table HashedAccounts<Key = B256, Value = Account>;
 
     /// Stores the current storage values indexed with `keccak256Address` and
     /// hash of storage key `keccak256key`.
-    /// This table is in preparation for merkelization and calculation of state root.
+    /// This table is in preparation for merklization and calculation of state root.
     /// Benefit for merklization is that hashed addresses/keys are sorted.
-    table HashedStorage<Key = B256, Value = StorageEntry, SubKey = B256>;
+    table HashedStorages<Key = B256, Value = StorageEntry, SubKey = B256>;
 
     /// Stores the current state's Merkle Patricia Tree.
-    table AccountsTrie<Key = StoredNibbles, Value = StoredBranchNode>;
+    table AccountsTrie<Key = StoredNibbles, Value = BranchNodeCompact>;
 
     /// From HashedAddress => NibblesSubKey => Intermediate value
     table StoragesTrie<Key = B256, Value = StorageTrieEntry, SubKey = StoredNibblesSubKey>;
@@ -359,16 +390,52 @@ tables! {
     /// Stores the transaction sender for each canonical transaction.
     /// It is needed to speed up execution stage and allows fetching signer without doing
     /// transaction signed recovery
-    table TxSenders<Key = TxNumber, Value = Address>;
+    table TransactionSenders<Key = TxNumber, Value = Address>;
 
     /// Stores the highest synced block number and stage-specific checkpoint of each stage.
-    table SyncStage<Key = StageId, Value = StageCheckpoint>;
+    table StageCheckpoints<Key = StageId, Value = StageCheckpoint>;
 
     /// Stores arbitrary data to keep track of a stage first-sync progress.
-    table SyncStageProgress<Key = StageId, Value = Vec<u8>>;
+    table StageCheckpointProgresses<Key = StageId, Value = Vec<u8>>;
 
     /// Stores the highest pruned block number and prune mode of each prune segment.
     table PruneCheckpoints<Key = PruneSegment, Value = PruneCheckpoint>;
+
+    /// Stores the history of client versions that have accessed the database with write privileges by unix timestamp in seconds.
+    table VersionHistory<Key = u64, Value = ClientVersion>;
+
+    /// Stores EIP-7685 EL -> CL requests, indexed by block number.
+    table BlockRequests<Key = BlockNumber, Value = Requests>;
+
+    /// Stores generic chain state info, like the last finalized block.
+    table ChainState<Key = ChainStateKey, Value = BlockNumber>;
+}
+
+/// Keys for the `ChainState` table.
+#[derive(Ord, Clone, Eq, PartialOrd, PartialEq, Debug, Deserialize, Serialize, Hash)]
+pub enum ChainStateKey {
+    /// Last finalized block key
+    LastFinalizedBlock,
+}
+
+impl Encode for ChainStateKey {
+    type Encoded = [u8; 1];
+
+    fn encode(self) -> Self::Encoded {
+        match self {
+            Self::LastFinalizedBlock => [0],
+        }
+    }
+}
+
+impl Decode for ChainStateKey {
+    fn decode<B: AsRef<[u8]>>(value: B) -> Result<Self, reth_db_api::DatabaseError> {
+        if value.as_ref() == [0] {
+            Ok(Self::LastFinalizedBlock)
+        } else {
+            Err(reth_db_api::DatabaseError::Decode)
+        }
+    }
 }
 
 // Alias types.
@@ -387,7 +454,7 @@ mod tests {
     #[test]
     fn parse_table_from_str() {
         for table in Tables::ALL {
-            assert_eq!(format!("{:?}", table), table.name());
+            assert_eq!(format!("{table:?}"), table.name());
             assert_eq!(table.to_string(), table.name());
             assert_eq!(Tables::from_str(table.name()).unwrap(), *table);
         }

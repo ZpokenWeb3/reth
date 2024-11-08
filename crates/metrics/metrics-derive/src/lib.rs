@@ -5,6 +5,7 @@
     html_favicon_url = "https://avatars0.githubusercontent.com/u/97369466?s=256",
     issue_tracker_base_url = "https://github.com/paradigmxyz/reth/issues/"
 )]
+#![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 
 use proc_macro::TokenStream;
@@ -57,10 +58,10 @@ mod with_attrs;
 /// impl Default for CustomMetrics {
 ///     fn default() -> Self {
 ///         Self {
-///             gauge: metrics::register_gauge!("metrics_custom_gauge"),
-///             gauge2: metrics::register_gauge!("metrics_custom_second_gauge"),
-///             counter: metrics::register_counter!("metrics_custom_counter"),
-///             histo: metrics::register_histogram!("metrics_custom_histogram"),
+///             gauge: metrics::gauge!("metrics_custom_gauge"),
+///             gauge2: metrics::gauge!("metrics_custom_second_gauge"),
+///             counter: metrics::counter!("metrics_custom_counter"),
+///             histo: metrics::histogram!("metrics_custom_histogram"),
 ///         }
 ///     }
 /// }
@@ -114,7 +115,7 @@ mod with_attrs;
 ///
 /// impl DynamicScopeMetrics {
 ///     pub fn new(scope: &str) -> Self {
-///         Self { gauge: metrics::register_gauge!(format!("{}{}{}", scope, "_", "gauge")) }
+///         Self { gauge: metrics::gauge!(format!("{}{}{}", scope, "_", "gauge")) }
 ///     }
 ///
 ///     pub fn describe(scope: &str) {

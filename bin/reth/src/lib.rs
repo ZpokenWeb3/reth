@@ -9,6 +9,9 @@
 //!   and leak detection functionality. See [jemalloc's opt.prof](https://jemalloc.net/jemalloc.3.html#opt.prof)
 //!   documentation for usage details. This is **not recommended on Windows**. See [here](https://rust-lang.github.io/rfcs/1974-global-allocators.html#jemalloc)
 //!   for more info.
+//! - `asm-keccak`: replaces the default, pure-Rust implementation of Keccak256 with one implemented
+//!   in assembly; see [the `keccak-asm` crate](https://github.com/DaniPopes/keccak-asm) for more
+//!   details and supported targets
 //! - `min-error-logs`: Disables all logs below `error` level.
 //! - `min-warn-logs`: Disables all logs below `warn` level.
 //! - `min-info-logs`: Disables all logs below `info` level. This can speed up the node, since fewer
@@ -26,16 +29,29 @@
 )]
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 
-pub mod builder;
 pub mod cli;
 pub mod commands;
-pub mod runner;
-pub mod utils;
+mod macros;
+
+/// Re-exported utils.
+pub mod utils {
+    pub use reth_db::open_db_read_only;
+
+    /// Re-exported from `reth_node_core`, also to prevent a breaking change. See the comment
+    /// on the `reth_node_core::args` re-export for more details.
+    pub use reth_node_core::utils::*;
+}
 
 /// Re-exported payload related types
 pub mod payload {
     pub use reth_payload_builder::*;
+    pub use reth_payload_primitives::*;
     pub use reth_payload_validator::ExecutionPayloadValidator;
+}
+
+/// Re-exported from `reth_node_api`.
+pub mod api {
+    pub use reth_node_api::*;
 }
 
 /// Re-exported from `reth_node_core`.
@@ -43,9 +59,9 @@ pub mod core {
     pub use reth_node_core::*;
 }
 
-/// Re-exported from `reth_node_core`.
+/// Re-exported from `reth_node_metrics`.
 pub mod prometheus_exporter {
-    pub use reth_node_core::prometheus_exporter::*;
+    pub use reth_node_metrics::recorder::*;
 }
 
 /// Re-export of the `reth_node_core` types specifically in the `args` module.
@@ -63,10 +79,20 @@ pub mod version {
     pub use reth_node_core::version::*;
 }
 
+/// Re-exported from `reth_node_builder`
+pub mod builder {
+    pub use reth_node_builder::*;
+}
+
 /// Re-exported from `reth_node_core`, also to prevent a breaking change. See the comment on
 /// the `reth_node_core::args` re-export for more details.
 pub mod dirs {
     pub use reth_node_core::dirs::*;
+}
+
+/// Re-exported from `reth_chainspec`
+pub mod chainspec {
+    pub use reth_chainspec::*;
 }
 
 /// Re-exported from `reth_provider`.
@@ -106,7 +132,9 @@ pub mod tasks {
 /// Re-exported from `reth_network`.
 pub mod network {
     pub use reth_network::*;
-    pub use reth_network_api::{noop, reputation, NetworkInfo, PeerKind, Peers, PeersInfo};
+    pub use reth_network_api::{
+        noop, test_utils::PeersHandleProvider, NetworkInfo, Peers, PeersInfo,
+    };
 }
 
 /// Re-exported from `reth_transaction_pool`.
@@ -127,6 +155,15 @@ pub mod rpc {
         pub use reth_rpc_types::*;
     }
 
+    /// Re-exported from `reth_rpc_server_types`.
+    pub mod server_types {
+        pub use reth_rpc_server_types::*;
+        /// Re-exported from `reth_rpc_eth_types`.
+        pub mod eth {
+            pub use reth_rpc_eth_types::*;
+        }
+    }
+
     /// Re-exported from `reth_rpc_api`.
     pub mod api {
         pub use reth_rpc_api::*;
@@ -138,17 +175,21 @@ pub mod rpc {
 
     /// Re-exported from `reth_rpc::rpc`.
     pub mod result {
-        pub use reth_rpc::result::*;
+        pub use reth_rpc_server_types::result::*;
     }
 
-    /// Re-exported from `reth_rpc::eth`.
+    /// Re-exported from `reth_rpc_types_compat`.
     pub mod compat {
         pub use reth_rpc_types_compat::*;
     }
 }
 
+// re-export for convenience
+#[doc(inline)]
+pub use reth_cli_runner::{tokio_runtime, CliContext, CliRunner};
+
 #[cfg(all(feature = "jemalloc", unix))]
-use jemallocator as _;
+use tikv_jemallocator as _;
 
 // for rendering diagrams
 use aquamarine as _;
