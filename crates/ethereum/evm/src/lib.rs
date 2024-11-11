@@ -57,7 +57,8 @@ impl ConfigureEvmEnv for EthEvmConfig {
 
         cfg_env.chain_id = chain_spec.chain().id();
         cfg_env.perf_analyse_created_bytecodes = AnalysisKind::Analyse;
-
+        cfg_env.cfg_env.disable_base_fee = true;
+        cfg_env.cfg_env.disable_balance_check = true;
         cfg_env.handler_cfg.spec_id = spec_id;
     }
 

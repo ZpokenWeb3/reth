@@ -375,9 +375,9 @@ where
     /// Returns an error if the block could not be executed or failed verification.
     fn execute(mut self, input: Self::Input<'_>) -> Result<Self::Output, Self::Error> {
         let BlockExecutionInput { block, total_difficulty } = input;
+        println!("Ok");
         let EthExecuteOutput { receipts, requests, gas_used } =
             self.execute_without_verification(block, total_difficulty)?;
-
         // NOTE: we need to merge keep the reverts for the bundle retention
         self.state.merge_transitions(BundleRetention::Reverts);
 

@@ -14,9 +14,9 @@ workspace = true
 # Reth
 reth-chainspec.workspace = true
 reth-ethereum-forks.workspace = true
-reth-evm.workspace = true
+reth-evm = { workspace = true }
 reth-primitives = { workspace = true, features = [] }
-reth-revm.workspace = true
+reth-revm = { workspace = true, features = ["optional_no_base_fee", "optional_balance_check"] }
 reth-ethereum-consensus.workspace = true
 reth-prune-types.workspace = true
 reth-execution-types.workspace = true
